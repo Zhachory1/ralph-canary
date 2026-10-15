@@ -1,6 +1,6 @@
 # DD: Morning digest deduplication
 
-Covers: `projects/digest-dedupe/prd.md` (commit `d15a167`). Revision v1.
+Covers: `projects/digest-dedupe/prd.md` (commit `d15a167`). Revision v2.
 
 ## Review header
 
@@ -25,15 +25,16 @@ Covers: `projects/digest-dedupe/prd.md` (commit `d15a167`). Revision v1.
    not explicitly license — so it needs your approval, not my inference. Marker-only
    is the smaller option and drops the ordering work from PR 2.
 4. **Whether a send ledger already exists.** I cannot see the digest implementation
-   (see Assumptions). This design adds a `digest_mention` ledger. If the digest
-   already records what it sent, dedup becomes a read against that record and PR 1
-   shrinks to a filter.
+   (see Assumptions). This design adds a `digest_mention` ledger and a `digest_run`
+   record. If the digest already records what it sent and when it ran, dedup becomes
+   a read against that record and PR 1 shrinks to a filter.
 
 ### Council dissent
 
 Independent reviewer delegation was unavailable in this run, so the critique below
 is my own, run as three passes (correctness, PRD fidelity, operations). Treat it as
-a self-review, not as three independent reviewers.
+a self-review, not as three independent reviewers. The v2 entries additionally
+incorporate a review round against v1, recorded on the card.
 
 - **Dedup key, scope of.** The correctness pass accepted a global
   `(card_id, digest_date)` key. The fidelity pass rejected it: with more than one
@@ -48,17 +49,51 @@ a self-review, not as three independent reviewers.
   success criterion is an unconditional "one mention of each blocked card", so a
   card unblocked and re-blocked the same day stays suppressed until tomorrow. This
   was a judgment call I could make from the PRD, so I made it.
+- **Whether spell ends are inferable at all (v2).** Review of v1 found that a
+  skipped digest run and a card being unblocked are the same shape in the mention
+  ledger — a gap — and argued this might be unresolvable and belong to you as a
+  fifth decision. I resolved it instead, by recording runs as well as mentions: a
+  gap on a date that *has* a run row means the card was not blocked, a gap on a date
+  with *no* run row means the digest never looked. The residual case, a card
+  unblocked and re-blocked entirely inside a stretch of skipped runs, stays
+  unresolvable and is recorded as a bounded limitation under Failure modes rather
+  than escalated — it overstates one card's age, it does not duplicate or drop it.
 
 ### Scope and PR breakdown
 
-**Scope: S.** Two PRs, neither touching the digest schedule or the per-gate alert.
+**Scope: S.** Re-checked at v2 after adding the run record: still S — one extra
+row written per scope per day on a write path PR 1 already introduces, no new
+service and no new call site. Two PRs, neither touching the digest schedule or the
+per-gate alert.
 
-- **PR 1 — ledger and suppression.** Ledger store, write-on-send, suppression filter
-  in assembly. Two flags, not one: write-on-send ships **on** so the ledger warms
-  with real data; suppression ships **off**. Digest output is unchanged in PR 1 —
-  unchanged output, not an inert no-op, since rows are accumulating.
-- **PR 2 — age and rendering.** Age computation, the aged marker, ordering if
-  decision 3 allows it, suppression flag flipped on against an already-warm ledger.
+- **PR 1 — ledger and suppression.** Mention ledger, run record, write-on-send,
+  suppression filter in assembly. Two flags, not one: write-on-send ships **on** so
+  both ledgers warm with real data; suppression ships **off**. Digest output is
+  unchanged in PR 1 — unchanged output, not an inert no-op, since rows are
+  accumulating. The run record must ship here and not in PR 2: PR 2's age
+  resolution reads run history, so it needs history already on disk at flip time.
+- **PR 2 — age and rendering.** Spell resolution, age computation, the aged marker,
+  ordering if decision 3 allows it, suppression flag flipped on against an
+  already-warm ledger.
+
+### What changed since v1
+
+Three findings from review round 1, all in the aging half; the dedup half is
+unchanged.
+
+- **Spell resolution, the load-bearing gap.** v1 never read a prior row, so age had
+  no input, and it described `spell_start` three inconsistent ways. v2 adds the
+  `digest_run` record, states the resolution rule explicitly (Age), adds it to the
+  Assembly flow as step 3, and reconciles the Dedup key, Age and Verification
+  passages to one behaviour. Consequence: the v1 assumption "a card's unblock is
+  observable to the digest" is **deleted** — the design no longer needs it, since
+  spell ends are now inferred from run history alone.
+- **PR 1's "output unchanged" claim.** Within-run dedup (flow step 2) sat behind no
+  flag while PR 1 claimed unchanged output. I cannot inspect candidate selection, so
+  I will not assert it never double-emits; instead step 2 is now gated by the
+  suppression flag, which makes PR 1's claim true either way.
+- **Fail-open.** Kept as an author decision, not promoted; one line added to Failure
+  modes justifying why it is settleable where decision 3's ordering question is not.
 
 ## Non-goals
 
@@ -69,6 +104,8 @@ a self-review, not as three independent reviewers.
   day", not for an eventual stop; a card blocked for 30 days still appears on day 30.
 - Backfilling the ledger for cards blocked before rollout. Day one treats every
   currently blocked card as a first mention, and ages run from rollout.
+- Reconstructing block history from any source other than the digest's own run
+  record — no card audit log, no blocked-state history table.
 
 ## Design
 
@@ -81,35 +118,68 @@ the same day finds rows already present and emits nothing, without application l
 deciding anything.
 
 Each row also carries `spell_start`, the date the card's current blocked spell was
-first mentioned, copied forward from the previous day's row. Without it, age would
-have to be inferred from the contiguity of ledger rows, which breaks the first time
-a digest run is skipped — a skipped day would read as a new spell and reset a
-week-old card to "new".
+first mentioned, carried forward from the card's row on the most recent *recorded
+run* (see Age) rather than from the previous calendar day.
+
+### Run record
+
+`(digest_scope, digest_date)`, unique, written at the same point and in the same
+transaction as that run's mention rows. It records that a digest for this scope
+actually assembled and sent on this date.
+
+This exists to make absence meaningful. Without it, a card having no row for a date
+is ambiguous between "the card was not blocked" and "the digest did not run", and
+those two demand opposite answers: the first ends a spell, the second must not
+disturb it. With it, a date carrying a run row is a date on which the digest saw
+every blocked card, so a card missing from it was demonstrably not blocked.
 
 ### Assembly flow
 
 One filter stage between candidate selection and rendering:
 
 1. Select blocked cards as today (unchanged).
-2. Deduplicate within the run in memory — a set, not a ledger concern.
-3. **Read** the ledger for `(digest_scope, *, digest_date)`. Drop any candidate
-   already present: it was mentioned today.
+2. Deduplicate within the run in memory — a set, not a ledger concern. Gated by the
+   suppression flag, so PR 1 cannot alter output.
+3. **Read** the ledger twice: once for `(digest_scope, *, digest_date)` to drop
+   candidates already mentioned today, and once for `(digest_scope, *, R)` where `R`
+   is the most recent recorded run date before today, to resolve each surviving
+   candidate's `spell_start`.
 4. Render the survivors, each annotated with its age.
-5. **Write** ledger rows only after the digest is successfully handed to the sender.
+5. **Write** mention rows and this run's record, only after the digest is
+   successfully handed to the sender.
 
 Read-to-filter and write-after-send are deliberately separate steps. Claiming rows at
 filter time would suppress a card permanently the moment a send failed, since the
 claim would outlive the message that was never delivered. Writing after the send
 inverts the risk: a crash between send and write costs one duplicate mention
 tomorrow. A duplicate is the exact failure the digest already tolerates today; a
-silent drop is a new one, and worse.
+silent drop is a new one, and worse. Because the run record is written in the same
+transaction, that crash also leaves no run row — so the lost day reads as a skipped
+day, not as a day on which nothing was blocked, and no card's age resets because of
+it.
 
 ### Age
 
-`digest_date - spell_start`, read from the row carried forward. A card with no row
-for its scope is new and renders with no marker. When a card is unblocked, its rows
-are left alone and `spell_start` is simply not carried forward; a later re-block
-starts a new spell at that day's date.
+`digest_date - spell_start`, with `spell_start` resolved per card at step 3 by one
+rule. Let `R` be the most recent date before `digest_date` with a run record for
+this scope.
+
+- No `R` at all — first run for this scope, including the first run after rollout:
+  the card is new, `spell_start = digest_date`, no marker.
+- A mention row exists for `(digest_scope, card_id, R)`: the spell is continuous,
+  `spell_start` is copied from that row.
+- No mention row for `(digest_scope, card_id, R)`: that run ran and did not mention
+  the card, so the card was not blocked then. Any earlier spell has ended. This is a
+  new spell, `spell_start = digest_date`, no marker.
+
+Only the single most recent run date is consulted, so the rule is one indexed read
+and does not walk history. Skipped days need no special case: they leave no run
+record, so `R` steps over them and a week-old card stays a week old. A re-blocked
+card is caught by the third branch, because the runs during its unblocked stretch
+recorded themselves without it.
+
+Unblocking is never written anywhere and no row is ever mutated or deleted on
+unblock; a spell's end is inferred, not recorded.
 
 ### Rendering
 
@@ -119,17 +189,28 @@ behaviour the PRD's problem statement is actually asking for.
 
 ### Failure modes
 
-- **Ledger unavailable.** Fail open: send undeduplicated, log loudly. This
-  *violates* the PRD's success criterion for the duration of the outage, which is an
-  accepted trade, not a free one — a noisy digest is the status quo, a missing
-  digest is a new regression.
+- **Ledger unavailable.** Fail open: send undeduplicated, log loudly, write neither
+  mention rows nor a run record, so the outage reads downstream as skipped days and
+  no age resets. This *violates* the PRD's success criterion for the duration of the
+  outage, which is an accepted trade, not a free one — a noisy digest is the status
+  quo, a missing digest is a new regression. I settled this rather than raising it
+  alongside decision 3 because its worst case is precisely today's behaviour, which
+  the reader already lives with and which reverts the moment the ledger returns,
+  whereas decision 3 changes what a healthy digest looks like every single day.
+- **Card unblocked and re-blocked entirely within a stretch of skipped runs.** No
+  run observed the gap, so the spell looks continuous and the card's age is
+  overstated by the length of the gap. Accepted and bounded: the card is still
+  mentioned once, on the correct day, with a marker — only the number is stale, and
+  only until the next unblock the digest does observe. Narrowing this would require
+  a block-history source outside the digest, which is a non-goal.
 - **Send timezone reconfigured.** One day may be double-mentioned or skipped at the
   change. Bounded to the day of the change. Note that ordinary DST shifts are *not*
   a hazard here: a calendar-date key in a fixed local zone still yields one date per
   day.
-- **Retention shorter than a block spell.** Age depends on ledger history, so
-  pruning rows faster than the longest expected spell makes an old card render as
-  new. Retention is a correctness constraint, not housekeeping.
+- **Retention shorter than a block spell.** Age depends on the chain of carried-
+  forward `spell_start` values and on run records surviving, so pruning either faster
+  than the longest expected spell makes an old card render as new. Retention is a
+  correctness constraint on both tables, not housekeeping.
 - **Card deleted mid-run.** Rows outlive the card and are pruned on retention. No
   foreign key.
 
@@ -139,16 +220,25 @@ The PRD's success criterion is directly testable and is PR 1's acceptance test: 
 the digest twice in one day, assert each blocked card appears exactly once across the
 combined output.
 
-PR 2: a card blocked across three simulated days appears once per day with the age
-marker advancing; a skipped day in the middle does not reset age; a first-time card
-renders with no marker. If decision 3 permits ordering, assert no aged entry sorts
-above a first-time entry.
+PR 2, age resolution — the four branches of the rule, each as a case:
+
+- A card blocked across three consecutive simulated days appears once per day with
+  the marker advancing 0d, 1d, 2d.
+- A skipped day in the middle (no run record written) does not reset age: day 1 and
+  day 3 run, day 2 does not, and day 3 renders 2d.
+- A day that runs and omits the card *does* reset it: blocked days 1-2, unblocked
+  day 3 with a run recorded, re-blocked day 4 renders as new with no marker.
+- A first-time card, and the first run after rollout, render with no marker.
 
 Multi-scope: with two digest scopes and one blocked card, both scopes mention it.
 This is the regression that a global key would cause, so it is worth a standing test.
 
+Crash-after-send: with mention rows and run record both absent for a date, the next
+run neither resets any age nor treats that date as evidence of unblocking.
+
 Flag-off regression: with suppression off, output matches a pre-change fixture
-exactly while ledger rows accumulate.
+exactly — including a fixture where candidate selection emits a card twice, since
+step 2 is gated too — while ledger rows accumulate.
 
 ## Assumptions
 
@@ -157,9 +247,12 @@ Every line is an inference of mine. The PRD and the card state none of them.
 - The digest has a single configured send timezone that assembly can read.
 - The digest assembles then sends as a batch, so a filter stage can sit between.
 - Cards have a stable identifier usable as a ledger key across days.
-- The digest has durable storage available; the ledger is a schema addition, not new
-  infrastructure.
-- A card's unblock is observable to the digest, so a spell can end.
+- The digest has durable storage available, with transactions spanning the two
+  writes at step 5; the ledgers are a schema addition, not new infrastructure.
+- A digest run that sends successfully can record that fact at the same point it
+  records its mentions.
+- Candidate selection returns every currently blocked card in scope on every run, so
+  a card's absence from a recorded run means it was not blocked.
 - Nothing downstream of the digest depends on a blocked card being re-listed daily.
 - I did not inspect the digest implementation. This repo holds documents only and the
   card scopes me to it, so component names describe roles, not verified modules, and
@@ -168,3 +261,7 @@ Every line is an inference of mine. The PRD and the card state none of them.
 ## Revision history
 
 - **v1** — first draft from `prd.md` at `d15a167`.
+- **v2** — review round 1 rework: added the `digest_run` record and an explicit
+  `spell_start` resolution rule, gated within-run dedup behind the suppression flag,
+  justified fail-open as author-settled. Dropped the "unblock is observable"
+  assumption, now unnecessary.
