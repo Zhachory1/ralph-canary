@@ -1,6 +1,6 @@
 # DD: Morning digest deduplication
 
-Covers: `projects/digest-dedupe/prd.md` (commit `d15a167`). Revision v2.
+Covers: `projects/digest-dedupe/prd.md` (commit `d15a167`). Revision v3.
 
 ## Review header
 
@@ -48,7 +48,9 @@ incorporate a review round against v1, recorded on the card.
 - **Re-block within the same day.** Dissent resolved without escalating: the PRD's
   success criterion is an unconditional "one mention of each blocked card", so a
   card unblocked and re-blocked the same day stays suppressed until tomorrow. This
-  was a judgment call I could make from the PRD, so I made it.
+  was a judgment call I could make from the PRD, so I made it. v3 extends the same
+  reasoning to the card's *age*, which is the complementary case: if an earlier run
+  today saw it unblocked, it still renders with its prior age rather than as new.
 - **Whether spell ends are inferable at all (v2).** Review of v1 found that a
   skipped digest run and a card being unblocked are the same shape in the mention
   ledger — a gap — and argued this might be unresolvable and belong to you as a
@@ -58,6 +60,19 @@ incorporate a review round against v1, recorded on the card.
   unblocked and re-blocked entirely inside a stretch of skipped runs, stays
   unresolvable and is recorded as a bounded limitation under Failure modes rather
   than escalated — it overstates one card's age, it does not duplicate or drop it.
+- **Whether a run earlier today should end a spell (v3).** Review of v2 showed that
+  `R` silently excludes runs earlier the same day, so a card observed unblocked by
+  the morning run and re-blocked before the evening run keeps its old age, and
+  offered widening `R` to the most recent run preceding *this run* as the principled
+  fix. I executed both before choosing. Widening is not a larger-but-better trade,
+  it is unsound against a date-keyed ledger: a run earlier today shares *today's*
+  mention partition, and a card surviving the suppression filter has by construction
+  no mention row today — so the third branch fires unconditionally and every card a
+  second run emits renders `0d`. A card blocked for a month renders as new, which
+  breaks the PRD's outcome outright. Making it sound needs mention rows keyed per
+  run, dissolving the `(digest_scope, card_id, digest_date)` uniqueness that is the
+  dedup mechanism itself. Resolved toward the exclusion — now stated explicitly
+  instead of left implicit — and toward the day as the single unit of resolution.
 
 ### Scope and PR breakdown
 
@@ -76,10 +91,26 @@ per-gate alert.
   ordering if decision 3 allows it, suppression flag flipped on against an
   already-warm ledger.
 
-### What changed since v1
+### What changed since v2
 
-Three findings from review round 1, all in the aging half; the dedup half is
-unchanged.
+One finding from review round 2, in the aging half. The dedup half is unchanged
+since v1, and the round-1 rework is unchanged since v2.
+
+- **`R` excluded runs earlier today, implicitly.** Both definitions said "before
+  today" while multiple runs per day is this design's founding premise, so a card
+  observed unblocked by the morning run and re-blocked by the evening one kept its
+  stale age — and a sentence in Age claimed re-blocked cards are *always* caught by
+  the third branch, which execution disproves. The exclusion is now stated at both
+  definitions and justified; the false universal is replaced by the two cases and
+  which branch each lands in; the Failure modes entry, previously scoped to gaps no
+  run observed, now covers both shapes of invisible unblock; and Verification pins
+  the case plus a guard against the unsound fix. Nothing about *what the code does*
+  changed in this round — v2's behaviour was already this; the document now
+  describes it accurately and says why it is the right behaviour.
+
+### What changed in v2 (review round 1)
+
+Three findings, all in the aging half; the dedup half was unchanged.
 
 - **Spell resolution, the load-bearing gap.** v1 never read a prior row, so age had
   no input, and it described `spell_start` three inconsistent ways. v2 adds the
@@ -118,8 +149,8 @@ the same day finds rows already present and emits nothing, without application l
 deciding anything.
 
 Each row also carries `spell_start`, the date the card's current blocked spell was
-first mentioned, carried forward from the card's row on the most recent *recorded
-run* (see Age) rather than from the previous calendar day.
+first mentioned, carried forward from the card's row on the most recent *prior date
+with a recorded run* (see Age) rather than from the previous calendar day.
 
 ### Run record
 
@@ -142,8 +173,9 @@ One filter stage between candidate selection and rendering:
    suppression flag, so PR 1 cannot alter output.
 3. **Read** the ledger twice: once for `(digest_scope, *, digest_date)` to drop
    candidates already mentioned today, and once for `(digest_scope, *, R)` where `R`
-   is the most recent recorded run date before today, to resolve each surviving
-   candidate's `spell_start`.
+   is the most recent recorded run date strictly before `digest_date`, to resolve
+   each surviving candidate's `spell_start`. Runs earlier *today* are deliberately
+   excluded from `R` — see Age.
 4. Render the survivors, each annotated with its age.
 5. **Write** mention rows and this run's record, only after the digest is
    successfully handed to the sender.
@@ -161,8 +193,9 @@ it.
 ### Age
 
 `digest_date - spell_start`, with `spell_start` resolved per card at step 3 by one
-rule. Let `R` be the most recent date before `digest_date` with a run record for
-this scope.
+rule. Let `R` be the most recent date strictly before `digest_date` with a run
+record for this scope. Runs recorded earlier on `digest_date` itself are excluded
+from `R`; the paragraph after the branches explains why.
 
 - No `R` at all — first run for this scope, including the first run after rollout:
   the card is new, `spell_start = digest_date`, no marker.
@@ -174,9 +207,26 @@ this scope.
 
 Only the single most recent run date is consulted, so the rule is one indexed read
 and does not walk history. Skipped days need no special case: they leave no run
-record, so `R` steps over them and a week-old card stays a week old. A re-blocked
-card is caught by the third branch, because the runs during its unblocked stretch
-recorded themselves without it.
+record, so `R` steps over them and a week-old card stays a week old.
+
+**The day is the unit of resolution, and `R` excludes every run earlier today.**
+A card re-blocked after an unblock that an *earlier day's* run observed is caught by
+the third branch, because that run recorded itself without the card. A card
+re-blocked after an unblock that only a *same-day* run observed is not: `R` has
+already stepped back past today, so the second branch finds yesterday's mention row
+and the spell reads as continuous. The card is still mentioned once, on the right
+day, with a marker; only the integer is older than the spell.
+
+This exclusion is deliberate, not an oversight inherited from the schema. Mention
+rows are keyed by date, so a run earlier today shares *today's* partition — and a
+card that survived step 3's suppression filter has, by construction, no mention row
+today. Letting `R` name a same-day run would therefore send every such card down the
+third branch unconditionally, rendering a month-old card as `0d`. Resolving
+same-day spell ends correctly would require mention rows keyed per run rather than
+per date, which dissolves the `(digest_scope, card_id, digest_date)` uniqueness that
+performs the deduplication the PRD actually asks for. Day-granular resolution also
+buys an invariant worth keeping: the age a card renders on a given day does not
+depend on which run of that day emits it.
 
 Unblocking is never written anywhere and no row is ever mutated or deleted on
 unblock; a spell's end is inferred, not recorded.
@@ -197,12 +247,17 @@ behaviour the PRD's problem statement is actually asking for.
   alongside decision 3 because its worst case is precisely today's behaviour, which
   the reader already lives with and which reverts the moment the ledger returns,
   whereas decision 3 changes what a healthy digest looks like every single day.
-- **Card unblocked and re-blocked entirely within a stretch of skipped runs.** No
-  run observed the gap, so the spell looks continuous and the card's age is
-  overstated by the length of the gap. Accepted and bounded: the card is still
+- **An unblock the age rule cannot see.** Two shapes, one symptom: the spell looks
+  continuous and the age is overstated. (a) The card is unblocked and re-blocked
+  entirely within a stretch of *skipped* runs — no run observed the gap at all.
+  Overstated by the length of the gap. (b) The card is unblocked and re-blocked
+  within a *single day*, where a run earlier today did observe it unblocked but `R`
+  excludes same-day runs by design (see Age). Overstated by the length of the spell
+  that preceded it. Both accepted and bounded identically: the card is still
   mentioned once, on the correct day, with a marker — only the number is stale, and
-  only until the next unblock the digest does observe. Narrowing this would require
-  a block-history source outside the digest, which is a non-goal.
+  only until the next unblock that a prior day's run observes. Narrowing (a) would
+  require a block-history source outside the digest, which is a non-goal; narrowing
+  (b) would require per-run mention keys, which would dissolve the dedup key itself.
 - **Send timezone reconfigured.** One day may be double-mentioned or skipped at the
   change. Bounded to the day of the change. Note that ordinary DST shifts are *not*
   a hazard here: a calendar-date key in a fixed local zone still yields one date per
@@ -229,6 +284,11 @@ PR 2, age resolution — the four branches of the rule, each as a case:
 - A day that runs and omits the card *does* reset it: blocked days 1-2, unblocked
   day 3 with a run recorded, re-blocked day 4 renders as new with no marker.
 - A first-time card, and the first run after rollout, render with no marker.
+- **Same-day re-block does *not* reset** (the documented exclusion, pinned so a
+  future change cannot alter it silently): blocked days 1-3, day 4 run 1 records a
+  run with the card absent, day 4 run 2 re-blocks it — renders `3d`, not `0d`. Pair
+  it with a regression guard that a card blocked for 30 days never renders `0d` from
+  a second same-day run, which is what widening `R` to same-day runs would cause.
 
 Multi-scope: with two digest scopes and one blocked card, both scopes mention it.
 This is the regression that a global key would cause, so it is worth a standing test.
@@ -265,3 +325,8 @@ Every line is an inference of mine. The PRD and the card state none of them.
   `spell_start` resolution rule, gated within-run dedup behind the suppression flag,
   justified fail-open as author-settled. Dropped the "unblock is observable"
   assumption, now unnecessary.
+- **v3** — review round 2 rework: made `R`'s exclusion of same-day runs explicit at
+  both definitions and justified it against the alternative, replaced a false
+  universal claim about re-blocked cards, widened the Failure modes entry to both
+  shapes of invisible unblock, pinned the case in Verification. Document-only; no
+  behaviour described in v2 changed.
