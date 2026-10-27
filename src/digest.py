@@ -14,5 +14,5 @@ def oldest_first(cards, limit):
     Each card has a numeric `waiting_since` timestamp; a smaller value has
     waited longer.
     """
-    ordered = sorted(cards, key=lambda c: c["waiting_since"], reverse=True)
+    ordered = sorted(cards, key=lambda c: c["waiting_since"])
     return ordered[:limit]
