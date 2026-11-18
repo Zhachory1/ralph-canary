@@ -1,1 +1,1 @@
-lock test initial
+lock test race A
