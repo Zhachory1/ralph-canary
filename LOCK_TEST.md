@@ -1,1 +1,1 @@
-lock test race A
+lock test race B
