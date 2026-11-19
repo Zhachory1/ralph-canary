@@ -45,6 +45,21 @@ def test_unusable_cache_and_redis_failures_fall_back_and_eviction_is_best_effort
     assert service.get("fallback").value is False
 
 
+def test_redis_unavailable_reads_and_writes_use_postgresql(setup_app):
+    client, _, _, cache = setup_app
+    service = client.app.state.flag_service
+    service.create("redis.outage", True, "operator-test", uuid4())
+
+    cache.fail_get = True
+    cache.fail_set = True
+    cache.fail_delete = True
+
+    assert service.get("redis.outage").value is True
+    updated = service.update("redis.outage", False, "1", "operator-test", uuid4())
+    assert updated.version == "2"
+    assert service.get("redis.outage").value is False
+
+
 def test_corrupt_valid_json_is_not_treated_as_a_flag(setup_app):
     client, _, _, cache = setup_app
     service = client.app.state.flag_service

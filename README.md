@@ -12,7 +12,22 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Compose starts PostgreSQL 16, Redis 7, and the API. PostgreSQL initialization creates the tables and a restricted `flag_app` role; its grants allow current-state writes and history inserts but not history updates or deletes. The database volume is named `flag-data`. To remove the local data explicitly, use `docker compose down -v`.
+Compose starts PostgreSQL 16, Redis 7, and the API. The API waits for PostgreSQL readiness, but Redis is deliberately not an API startup dependency: the service starts and serves PostgreSQL-backed reads and writes even if Redis is unhealthy or stopped. PostgreSQL initialization creates the tables and a restricted `flag_app` role; its grants allow current-state writes and history inserts but not history updates or deletes. The database volume is named `flag-data`. To remove the local data explicitly, use `docker compose down -v`.
+
+To check the Redis-outage behavior, create a flag while the stack is running, stop Redis, and recreate just the API:
+
+```sh
+curl -H 'Authorization: Bearer local-operator-token-change-me' \
+  -H 'Content-Type: application/json' \
+  -d '{"flag_key":"outage.check","value":true}' \
+  http://localhost:8000/v1/admin/flags
+docker compose stop redis
+docker compose up -d --force-recreate api
+curl -H 'Authorization: Bearer local-reader-token-change-me' \
+  http://localhost:8000/v1/flags/outage.check
+```
+
+The last request should return the flag from PostgreSQL despite the API having started with Redis stopped. Redis can be restarted with `docker compose start redis`.
 
 Open the admin panel and paste an authorized bearer token from `FLAG_AUTH_TOKENS`. The token remains in page memory and is not stored in a cookie or local storage. The included sample tokens are local-only. The API also accepts bearer tokens directly. Set `REDIS_URL` to an empty value to disable caching; the evaluator continues to use PostgreSQL.
 
