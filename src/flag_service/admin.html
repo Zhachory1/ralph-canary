@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flag operator console</title>
+  <style>
+    body { max-width: 960px; margin: 2rem auto; padding: 0 1rem; font: 16px system-ui, sans-serif; color: #202733; }
+    label { display: inline-block; margin: .4rem .7rem .4rem 0; }
+    input, select, button { font: inherit; padding: .35rem; }
+    input[type="password"] { width: 26rem; max-width: 90vw; }
+    button { cursor: pointer; }
+    section { border-top: 1px solid #ccd2d9; margin-top: 1.5rem; padding-top: 1rem; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f4f6f8; padding: 1rem; }
+    #status { min-height: 1.5rem; }
+  </style>
+</head>
+<body>
+  <h1>Boolean flag operator console</h1>
+  <p>Authorized requests use a bearer token held only in this page's memory. Clear it when finished.</p>
+  <label>Access token <input id="token" type="password" autocomplete="off"></label>
+  <button id="clear-token" type="button">Clear token</button>
+  <p id="status" role="status" aria-live="polite"></p>
+
+  <section>
+    <h2>Flags</h2>
+    <button id="refresh" type="button">Refresh list</button>
+    <pre id="flags">Sign in with an authorized token to load flags.</pre>
+  </section>
+  <section>
+    <h2>Create</h2>
+    <form id="create-form">
+      <label>Key <input name="flag_key" pattern="[a-z][a-z0-9_.-]{0,127}" maxlength="128" required></label>
+      <label>Value <select name="value"><option value="true">true</option><option value="false">false</option></select></label>
+      <button type="submit">Create flag</button>
+    </form>
+  </section>
+  <section>
+    <h2>Update</h2>
+    <form id="update-form">
+      <label>Key <input name="flag_key" pattern="[a-z][a-z0-9_.-]{0,127}" maxlength="128" required></label>
+      <label>Expected version <input name="version" inputmode="numeric" pattern="[1-9][0-9]*" required></label>
+      <label>New value <select name="value"><option value="true">true</option><option value="false">false</option></select></label>
+      <button type="submit">Update with If-Match</button>
+    </form>
+  </section>
+  <section>
+    <h2>History</h2>
+    <form id="history-form">
+      <label>Key <input name="flag_key" pattern="[a-z][a-z0-9_.-]{0,127}" maxlength="128" required></label>
+      <button type="submit">Load history</button>
+    </form>
+    <pre id="history">History requires an auditor token.</pre>
+  </section>
+  <script src="/admin.js" defer></script>
+</body>
+</html>

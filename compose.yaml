@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: flags
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "${POSTGRES_ADMIN_PASSWORD:?copy .env.example to .env}"
+      FLAG_DB_PASSWORD: "${FLAG_DB_PASSWORD:?set FLAG_DB_PASSWORD in .env}"
+    volumes:
+      - flag-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d flags"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: "postgresql+psycopg://flag_app:${FLAG_DB_PASSWORD:?set FLAG_DB_PASSWORD in .env}@postgres:5432/flags"
+      REDIS_URL: "${REDIS_URL-redis://redis:6379/0}"
+      FLAG_AUTH_TOKENS: "${FLAG_AUTH_TOKENS:?set FLAG_AUTH_TOKENS in .env}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+
+volumes:
+  flag-data:
