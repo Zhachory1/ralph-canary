@@ -30,6 +30,31 @@ def test_cache_fixed_ttl_hit_expiry_and_stale_repopulation_bound(setup_app):
     assert cache.expirations[key] == cache.now + CACHE_TTL_SECONDS
 
 
+def test_missing_flag_is_not_cached_and_can_be_read_after_creation(setup_app):
+    client, _, _, cache = setup_app
+    service = client.app.state.flag_service
+    flag_key = "created.after.miss"
+    cache_key = f"ralph-canary:flag:v1:{flag_key}"
+
+    try:
+        service.get(flag_key)
+    except FlagError as error:
+        assert error.status == 404
+        assert error.code == "FLAG_NOT_FOUND"
+    else:
+        raise AssertionError("missing flag should return 404")
+
+    assert cache_key not in cache.values
+    assert all(call[0] != cache_key for call in cache.set_calls)
+
+    service.create(flag_key, True, "operator-test", uuid4())
+
+    record = service.get(flag_key)
+    assert record.value is True
+    assert record.version == "1"
+    assert cache_key in cache.values
+
+
 def test_unusable_cache_and_redis_failures_fall_back_and_eviction_is_best_effort(setup_app):
     client, _, _, cache = setup_app
     service = client.app.state.flag_service
